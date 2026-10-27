@@ -18,7 +18,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleShortVersionString</key><string>0.1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
-<key>NSAppleEventsUsageDescription</key><string>Consulta la canción actual y su portada en Música para actualizar el fondo de pantalla.</string>
+<key>NSAppleEventsUsageDescription</key><string>Consulta la canción actual y su portada en Música o Spotify para actualizar el fondo de pantalla.</string>
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$app"

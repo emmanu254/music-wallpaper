@@ -10,7 +10,7 @@ private final class DesktopPanel: NSPanel {
 @main
 final class MusicWallpaper: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let status = NSMenuItem(title: "Esperando a Música…", action: nil, keyEquivalent: "")
+    private let status = NSMenuItem(title: "Esperando a Música o Spotify…", action: nil, keyEquivalent: "")
     private let loginItem = NSMenuItem(title: "Abrir al iniciar sesión", action: nil, keyEquivalent: "")
     private var timer: Timer?
     private var lastTrackID: String?
@@ -21,6 +21,8 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
     private var currentImage: NSImage?
     private var cachedTrack: Track?
     private var cachedImage: NSImage?
+    private var preferredPlayer: Player?
+    private var displayedPlayer: Player?
     private struct WindowKey: Hashable { let display: String; let space: UInt64 }
     private var wallpaperWindows: [WindowKey: NSWindow] = [:]
     private var spaceRetry: DispatchWorkItem?
@@ -60,6 +62,7 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
         updateLoginItemMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(musicPlaybackChanged(_:)), name: Notification.Name("com.apple.Music.playerInfo"), object: nil, suspensionBehavior: .deliverImmediately)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(spotifyPlaybackChanged(_:)), name: Notification.Name("com.spotify.client.PlaybackStateChanged"), object: nil, suspensionBehavior: .deliverImmediately)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appTerminated(_:)), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spacesChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.update() }
@@ -138,21 +141,34 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
     }
 
     @objc private func musicPlaybackChanged(_ notification: Notification) {
+        playbackChanged(notification, from: .music)
+    }
+
+    @objc private func spotifyPlaybackChanged(_ notification: Notification) {
+        playbackChanged(notification, from: .spotify)
+    }
+
+    private func playbackChanged(_ notification: Notification, from player: Player) {
         generation += 1
         let info = notification.userInfo ?? [:]
         let state = (info["Player State"] as? String)?.lowercased()
         if state == "paused" || state == "stopped" {
-            refreshPending = false
-            hideWallpaper()
-            setStatus("Música está en pausa o sin reproducir")
+            if displayedPlayer == player {
+                hideWallpaper()
+                setStatus("Buscando reproducción activa…")
+            }
+            if preferredPlayer == player { preferredPlayer = nil }
+            update()
             return
         }
-        if state == "playing", let track = cachedTrack, let image = cachedImage,
+        if state == "playing" { preferredPlayer = player }
+        if state == "playing", let track = cachedTrack, track.player == player, let image = cachedImage,
            let title = info["Name"] as? String, let artist = info["Artist"] as? String,
            let album = info["Album"] as? String,
            title == track.title, artist == track.artist, album == track.album {
             if wallpaperWindows.isEmpty { showWallpaper(image) }
             lastTrackID = track.id
+            displayedPlayer = player
         } else if state == "playing" {
             hideWallpaper()
         }
@@ -161,11 +177,11 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
 
     @objc private func appTerminated(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier == "com.apple.Music" else { return }
+              let player = Player.allCases.first(where: { $0.bundleID == app.bundleIdentifier }) else { return }
         generation += 1
-        refreshPending = false
-        hideWallpaper()
-        setStatus("Abre Música para comenzar")
+        if displayedPlayer == player { hideWallpaper() }
+        if preferredPlayer == player { preferredPlayer = nil }
+        update()
     }
 
     private func setStatus(_ message: String) {
@@ -182,6 +198,7 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
         wallpaperWindows.removeAll()
         currentImage = nil
         lastTrackID = nil
+        displayedPlayer = nil
     }
 
     private func showWallpaper(_ image: NSImage) {
@@ -272,15 +289,17 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
         // Reconcile newly created or removed Spaces even if playback did not change.
         reconcileWallpaper()
         guard !busy else { refreshPending = true; return }
-        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty else {
+        guard Player.allCases.contains(where: { $0.isRunning }) else {
             hideWallpaper()
-            setStatus("Abre Música para comenzar")
+            setStatus("Abre Música o Spotify para comenzar")
             return
         }
         busy = true
         let requestGeneration = generation
+        let preferred = preferredPlayer
+        let cached = cachedTrack
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result = Self.readCurrentTrack()
+            let result = Self.readCurrentTrack(preferred: preferred, cached: cached)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.busy = false
@@ -289,19 +308,19 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
                     return
                 }
                 self.refreshPending = false
-                guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty else {
+                guard Player.allCases.contains(where: { $0.isRunning }) else {
                     self.hideWallpaper()
-                    self.setStatus("Abre Música para comenzar")
+                    self.setStatus("Abre Música o Spotify para comenzar")
                     return
                 }
                 switch result {
                 case .success(let track):
                     guard let track else {
                         self.hideWallpaper()
-                        self.setStatus("Música está en pausa o sin reproducir")
+                        self.setStatus("Música y Spotify están en pausa o sin reproducir")
                         return
                     }
-                    if track.id != self.lastTrackID || self.wallpaperWindows.isEmpty {
+                    if track.id != self.lastTrackID || track.player != self.displayedPlayer || self.wallpaperWindows.isEmpty {
                         guard let image = NSImage(data: track.artwork), image.isValid else {
                             self.hideWallpaper()
                             self.setStatus("Esta canción no tiene portada disponible")
@@ -311,8 +330,9 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
                         self.cachedImage = image
                         self.showWallpaper(image)
                         self.lastTrackID = track.id
+                        self.displayedPlayer = track.player
                     }
-                    self.setStatus("\(track.title) — \(track.artist)")
+                    self.setStatus("\(track.title) — \(track.artist) · \(track.player.label)")
                 case .failure(let error):
                     self.hideWallpaper()
                     self.setStatus(error.localizedDescription)
@@ -321,13 +341,34 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
         }
     }
 
-    private struct Track { let id: String; let title: String; let artist: String; let album: String; let artwork: Data }
+    private enum Player: CaseIterable {
+        case music, spotify
+        var bundleID: String { self == .music ? "com.apple.Music" : "com.spotify.client" }
+        var label: String { self == .music ? "Música" : "Spotify" }
+        var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty }
+    }
+    private struct Track { let player: Player; let id: String; let title: String; let artist: String; let album: String; let artwork: Data; var artworkURL: URL? = nil }
     private struct ReadError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
     }
 
-    private static func readCurrentTrack() -> Result<Track?, ReadError> {
+    private static func readCurrentTrack(preferred: Player?, cached: Track?) -> Result<Track?, ReadError> {
+        var order = Player.allCases
+        if let preferred { order = [preferred] + order.filter { $0 != preferred } }
+        var firstError: ReadError?
+        for player in order where player.isRunning {
+            switch readCurrentTrack(from: player, cached: cached) {
+            case .success(let track?): return .success(track)
+            case .success(nil): continue
+            case .failure(let error): if firstError == nil { firstError = error }
+            }
+        }
+        return firstError.map { .failure($0) } ?? .success(nil)
+    }
+
+    private static func readCurrentTrack(from player: Player, cached: Track?) -> Result<Track?, ReadError> {
+        if player == .spotify { return readSpotifyTrack(cached: cached) }
         let source = """
         tell application "Music"
             if player state is not playing then return {"paused"}
@@ -353,6 +394,59 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
               let artwork = result.atIndex(6)?.data, !artwork.isEmpty else {
             return .failure(ReadError(message: "Portada no disponible para esta canción"))
         }
-        return .success(Track(id: id, title: title, artist: artist, album: album, artwork: artwork))
+        return .success(Track(player: .music, id: id, title: title, artist: artist, album: album, artwork: artwork))
+    }
+
+    private final class ArtworkResponse: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Data?
+        func set(_ data: Data?) { lock.lock(); value = data; lock.unlock() }
+        func get() -> Data? { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    private static func readSpotifyTrack(cached: Track?) -> Result<Track?, ReadError> {
+        let source = """
+        tell application "Spotify"
+            if player state is not playing then return {"paused"}
+            set t to current track
+            return {"playing", id of t, name of t, artist of t, album of t, artwork url of t}
+        end tell
+        """
+        guard let script = NSAppleScript(source: source) else { return .failure(ReadError(message: "No se pudo preparar la consulta a Spotify")) }
+        var details: NSDictionary?
+        let result = script.executeAndReturnError(&details)
+        if let details {
+            if (details[NSAppleScript.errorNumber] as? Int) == -1743 {
+                return .failure(ReadError(message: "Permite acceso a Spotify en Privacidad y seguridad > Automatización"))
+            }
+            return .failure(ReadError(message: "No se pudo consultar Spotify: \(details[NSAppleScript.errorMessage] as? String ?? "error desconocido")"))
+        }
+        guard let state = result.atIndex(1)?.stringValue else { return .failure(ReadError(message: "Respuesta inesperada de Spotify")) }
+        if state == "paused" { return .success(nil) }
+        guard state == "playing", let id = result.atIndex(2)?.stringValue,
+              let title = result.atIndex(3)?.stringValue, let artist = result.atIndex(4)?.stringValue,
+              let album = result.atIndex(5)?.stringValue, let urlString = result.atIndex(6)?.stringValue,
+              let url = URL(string: urlString), url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(), host.hasSuffix(".scdn.co") || host.hasSuffix(".spotifycdn.com") else {
+            return .failure(ReadError(message: "Portada no disponible para esta canción de Spotify"))
+        }
+        if let cached, cached.player == .spotify, cached.id == id, cached.artworkURL == url {
+            return .success(Track(player: .spotify, id: id, title: title, artist: artist, album: album, artwork: cached.artwork, artworkURL: url))
+        }
+        let session = URLSession(configuration: .ephemeral)
+        let semaphore = DispatchSemaphore(value: 0)
+        let responseData = ArtworkResponse()
+        let task = session.dataTask(with: url) { data, response, _ in
+            if let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+               let data, data.count <= 10_000_000 { responseData.set(data) }
+            semaphore.signal()
+        }
+        task.resume()
+        if semaphore.wait(timeout: .now() + 8) == .timedOut { task.cancel() }
+        session.invalidateAndCancel()
+        guard let artwork = responseData.get(), !artwork.isEmpty else {
+            return .failure(ReadError(message: "No se pudo cargar la portada de Spotify"))
+        }
+        return .success(Track(player: .spotify, id: id, title: title, artist: artist, album: album, artwork: artwork, artworkURL: url))
     }
 }
