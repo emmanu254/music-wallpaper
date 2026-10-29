@@ -262,6 +262,9 @@ final class MusicWallpaper: NSObject, NSApplicationDelegate {
                 needsRetry = true
                 continue
             }
+            // WindowServer can translate a window when moving it to a Space on
+            // another display. Restore the target display's global coordinates.
+            if window.frame != screen.frame { window.setFrame(screen.frame, display: true) }
             wallpaperWindows[key] = window
         }
         if needsRetry { scheduleSpaceRetry() }

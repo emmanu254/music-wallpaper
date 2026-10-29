@@ -66,7 +66,7 @@ La integración privada con WindowServer puede dejar de funcionar tras una actua
 - No lee música que suene en el navegador, en otro reproductor o en otro dispositivo.
 - Algunas canciones, pódcasts, transmisiones o archivos locales pueden no exponer una portada compatible.
 - Las portadas animadas no están implementadas. Apple documenta cómo una app proporciona sus propios recursos animados al sistema, pero no se identificó una API pública para obtener los videos animados que usa Música.
-- Se ha comprobado con una pantalla. Varias pantallas, Stage Manager y cambios futuros de macOS necesitan más pruebas.
+- Se ha comprobado la posición de las capas con dos pantallas. Las transiciones entre espacios, Stage Manager y cambios futuros de macOS necesitan más pruebas visuales.
 
 ## Estructura del proyecto
 
